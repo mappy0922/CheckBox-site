@@ -36,6 +36,89 @@ const COMPLETION_KEYWORDS = [
   'ok', 'OK', 'Ok', 'done', 'Done', 'check', 'Check', '買い終わった', '買ってきた', 'ゲット', 'get'
 ];
 
+/**
+ * 自然言語やメッセージから日時表現を抽出して ISO 文字列に変換する
+ * 例: "サラダ 18:30まで", "納豆 明日 15:00", "牛乳 9/30 12:00まで"
+ */
+function parseDateTimeFromText(rawText) {
+  let text = rawText.trim();
+  let dueDate = null;
+  const now = new Date();
+
+  // パターン1: YYYY/MM/DD HH:mm or YYYY-MM-DD HH:mm
+  const fullDateRegex = /(\d{4})[/-](\d{1,2})[/-](\d{1,2})\s+(\d{1,2}):(\d{2})(?:まで)?/i;
+  const fullMatch = text.match(fullDateRegex);
+  if (fullMatch) {
+    const year = parseInt(fullMatch[1], 10);
+    const month = parseInt(fullMatch[2], 10) - 1;
+    const day = parseInt(fullMatch[3], 10);
+    const hour = parseInt(fullMatch[4], 10);
+    const minute = parseInt(fullMatch[5], 10);
+    const d = new Date(year, month, day, hour, minute, 0);
+    if (!isNaN(d.getTime())) {
+      dueDate = d.toISOString();
+      text = text.replace(fullMatch[0], '').trim();
+      return { text, dueDate };
+    }
+  }
+
+  // パターン2: MM/DD HH:mm or MM月DD日 HH:mm (例: 9/30 15:00, 9月30日 15:30まで)
+  const monthDateRegex = /(\d{1,2})[月/](\d{1,2})日?\s*(\d{1,2}):(\d{2})(?:まで)?/i;
+  const monthMatch = text.match(monthDateRegex);
+  if (monthMatch) {
+    const month = parseInt(monthMatch[1], 10) - 1;
+    const day = parseInt(monthMatch[2], 10);
+    const hour = parseInt(monthMatch[3], 10);
+    const minute = parseInt(monthMatch[4], 10);
+    let year = now.getFullYear();
+    const d = new Date(year, month, day, hour, minute, 0);
+    // 過去の日付（例: 現在12月で1月を指定した場合）は翌年に
+    if (d.getTime() < now.getTime() - 86400000 * 30) {
+      d.setFullYear(year + 1);
+    }
+    if (!isNaN(d.getTime())) {
+      dueDate = d.toISOString();
+      text = text.replace(monthMatch[0], '').trim();
+      return { text, dueDate };
+    }
+  }
+
+  // パターン3: 明日 / あす / あさって HH:mm or HH時mm分 (例: 明日 18:30まで, あす10:00)
+  const relativeDateRegex = /(明日|あす|明後日|あさって)\s*(\d{1,2})(?::|時)(\d{2})?分?(?:まで)?/i;
+  const relMatch = text.match(relativeDateRegex);
+  if (relMatch) {
+    const daysToAdd = (relMatch[1] === '明後日' || relMatch[1] === 'あさって') ? 2 : 1;
+    const hour = parseInt(relMatch[2], 10);
+    const minute = relMatch[3] ? parseInt(relMatch[3], 10) : 0;
+    const targetDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysToAdd, hour, minute, 0);
+    if (!isNaN(targetDate.getTime())) {
+      dueDate = targetDate.toISOString();
+      text = text.replace(relMatch[0], '').trim();
+      return { text, dueDate };
+    }
+  }
+
+  // パターン4: HH:mm or HH時mm分 or HH時 (例: 18:30まで, 18時30分まで, 18:00, 18時)
+  const timeOnlyRegex = /(\d{1,2})(?::|時)(\d{2})?分?(?:まで)?/;
+  const timeMatch = text.match(timeOnlyRegex);
+  if (timeMatch) {
+    const hour = parseInt(timeMatch[1], 10);
+    const minute = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      let targetDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0);
+      // 指定時間が現時刻より過去なら翌日の同時刻とする
+      if (targetDate.getTime() < now.getTime()) {
+        targetDate.setDate(targetDate.getDate() + 1);
+      }
+      dueDate = targetDate.toISOString();
+      text = text.replace(timeMatch[0], '').trim();
+      return { text, dueDate };
+    }
+  }
+
+  return { text, dueDate };
+}
+
 // セッション管理 (現在アクティブなセッション)
 let currentSession = {
   sessionId: null,
@@ -68,6 +151,60 @@ function addLog(type, text, user = null) {
   }
   return logItem;
 }
+
+// 期限超過監視タイマー (10秒ごとに定期チェック)
+setInterval(async () => {
+  try {
+    if (!discordClient || !botStatus.isReady) return;
+    if (currentSession.status !== 'connected' || !currentSession.activeChannelId) return;
+
+    const now = new Date();
+    const itemsToRemind = [];
+
+    for (const item of currentSession.items) {
+      if (!item.checked && item.dueDate && !item.reminded) {
+        const due = new Date(item.dueDate);
+        if (now >= due) {
+          itemsToRemind.push(item);
+        }
+      }
+    }
+
+    if (itemsToRemind.length === 0) return;
+
+    const channel = await discordClient.channels.fetch(currentSession.activeChannelId).catch(() => null);
+    if (!channel) return;
+
+    for (const item of itemsToRemind) {
+      item.reminded = true;
+      item.remindedAt = now.toISOString();
+
+      const dueDateObj = new Date(item.dueDate);
+      const formattedDate = dueDateObj.toLocaleString('ja-JP', {
+        month: 'numeric',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+
+      // 送信者IDがあればメンション、なければ @here
+      const mention = item.sourceUserId ? `<@${item.sourceUserId}>` : '@here';
+
+      const reminderMessage = `⚠️ ${mention} **【期限超過リマインド】**\n登録されたアイテム「**${item.text}**」の期限（**${formattedDate}**）を過ぎました！`;
+
+      try {
+        await channel.send(reminderMessage);
+        addLog('warning', `⚠️ 「${item.text}」の期限超過リマインドをDiscordに通知しました（期限: ${formattedDate}）`, item.sourceUser);
+      } catch (err) {
+        console.error('Failed to send reminder to Discord:', err);
+      }
+    }
+
+    io.emit('session_update', currentSession);
+  } catch (err) {
+    console.error('Error in deadline watcher interval:', err);
+  }
+}, 10000);
 
 // Bot初期化関数
 async function initDiscordBot(token) {
@@ -114,6 +251,7 @@ async function initDiscordBot(token) {
       if (!rawContent) return;
 
       const authorName = message.member?.displayName || message.author.displayName || message.author.username;
+      const authorId = message.author.id;
 
       // 1. 起動コード待機中の場合: 届いたメッセージが起動コードと一致するか判定
       if (currentSession.status === 'waiting_code' && currentSession.pinCode) {
@@ -132,7 +270,7 @@ async function initDiscordBot(token) {
           try {
             await message.react('🚀');
             await message.reply({
-              content: `✅ **Webサイトとの連携を開始しました！**\n・アイテム（例: サラダ、納豆）を送るとリストに追加されます。\n・「サラダ購入」「納豆完了」のように送ると自動でチェックがつきます。`
+              content: `✅ **Webサイトとの連携を開始しました！**\n・アイテム（例: サラダ、納豆 18:30まで）を送るとリストに追加されます。\n・「サラダ購入」「納豆完了」のように送ると自動でチェックがつきます。\n・設定した期限を過ぎるとメンション通知が届きます。`
             });
           } catch (err) {
             console.error('Discord reply error:', err);
@@ -195,19 +333,34 @@ async function initDiscordBot(token) {
         if (lines.length > 0) {
           const newItems = [];
           for (const line of lines) {
+            // 日時表現のパース抽出
+            const { text: cleanText, dueDate } = parseDateTimeFromText(line);
+            const itemTitle = cleanText || line;
+
             const newItem = {
               id: 'item_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
-              text: line,
+              text: itemTitle,
               checked: false,
               createdAt: new Date().toISOString(),
               sourceUser: authorName,
-              avatar: message.author.displayAvatarURL()
+              sourceUserId: authorId,
+              avatar: message.author.displayAvatarURL(),
+              dueDate: dueDate,
+              reminded: false
             };
             currentSession.items.push(newItem);
             newItems.push(newItem);
           }
 
-          const addedNames = newItems.map(i => `「${i.text}」`).join(', ');
+          const addedNames = newItems.map(i => {
+            if (i.dueDate) {
+              const d = new Date(i.dueDate);
+              const timeStr = `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+              return `「${i.text} (期限: ${timeStr})」`;
+            }
+            return `「${i.text}」`;
+          }).join(', ');
+
           addLog('item_added', `新規アイテム ${addedNames} を追加しました`, authorName);
 
           try {
@@ -296,23 +449,58 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 4. 手動アイテム追加
-  socket.on('add_item', (text) => {
+  // 4. 手動アイテム追加 (期限指定にも対応)
+  socket.on('add_item', (data) => {
+    let text = '';
+    let dueDate = null;
+
+    if (typeof data === 'string') {
+      text = data;
+    } else if (data && typeof data === 'object') {
+      text = data.text || '';
+      dueDate = data.dueDate || null;
+    }
+
     if (!text || !text.trim()) return;
+
+    // テキスト内の自然言語日時も解析
+    if (!dueDate) {
+      const parsed = parseDateTimeFromText(text);
+      text = parsed.text || text;
+      dueDate = parsed.dueDate;
+    }
+
     const newItem = {
       id: 'item_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
       text: text.trim(),
       checked: false,
       createdAt: new Date().toISOString(),
       sourceUser: 'Webサイト手動登録',
-      avatar: null
+      sourceUserId: null,
+      avatar: null,
+      dueDate: dueDate,
+      reminded: false
     };
     currentSession.items.push(newItem);
-    addLog('item_added', `手動でアイテム「${newItem.text}」を追加しました`);
+    addLog('item_added', `手動でアイテム「${newItem.text}」${dueDate ? ` (期限: ${new Date(dueDate).toLocaleString('ja-JP')})` : ''} を追加しました`);
     io.emit('session_update', currentSession);
   });
 
-  // 5. アイテム削除
+  // 5. 期限の更新・削除
+  socket.on('update_item_due_date', ({ itemId, dueDate }) => {
+    const item = currentSession.items.find(i => i.id === itemId);
+    if (item) {
+      item.dueDate = dueDate || null;
+      item.reminded = false; // 期限を変更した場合はリマインド状態をリセット
+      const logText = dueDate 
+        ? `「${item.text}」の期限を ${new Date(dueDate).toLocaleString('ja-JP')} に設定しました` 
+        : `「${item.text}」の期限を解除しました`;
+      addLog('info', logText);
+      io.emit('session_update', currentSession);
+    }
+  });
+
+  // 6. アイテム削除
   socket.on('delete_item', (itemId) => {
     const index = currentSession.items.findIndex(i => i.id === itemId);
     if (index !== -1) {
@@ -322,7 +510,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 6. リストのクリア (全削除 or チェック済み削除)
+  // 7. リストのクリア (全削除 or チェック済み削除)
   socket.on('clear_items', ({ type }) => {
     if (type === 'completed') {
       const remaining = currentSession.items.filter(i => !i.checked);
@@ -336,7 +524,7 @@ io.on('connection', (socket) => {
     io.emit('session_update', currentSession);
   });
 
-  // 7. Botトークンの更新/接続
+  // 8. Botトークンの更新/接続
   socket.on('set_bot_token', async (token) => {
     if (token && token.trim()) {
       await initDiscordBot(token.trim());

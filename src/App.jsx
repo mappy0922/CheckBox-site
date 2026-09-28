@@ -56,7 +56,7 @@ export default function App() {
           if (soundEnabled) playSound('stop');
         }
 
-        // アイテム追加/完了チェックによる効果音
+        // アイテム追加/完了チェック/リマインド通知による効果音
         const prevItems = prev.items || [];
         const nextItems = updatedSession.items || [];
 
@@ -65,7 +65,13 @@ export default function App() {
         } else {
           const prevChecked = prevItems.filter(i => i.checked).length;
           const nextChecked = nextItems.filter(i => i.checked).length;
-          if (nextChecked > prevChecked) {
+          
+          const prevReminded = prevItems.filter(i => i.reminded).length;
+          const nextReminded = nextItems.filter(i => i.reminded).length;
+
+          if (nextReminded > prevReminded) {
+            if (soundEnabled) playSound('warning');
+          } else if (nextChecked > prevChecked) {
             if (soundEnabled) playSound('check');
             // 全完了時のConfetti
             if (nextChecked === nextItems.length && nextItems.length > 0) {
@@ -108,9 +114,15 @@ export default function App() {
     }
   };
 
-  const handleAddItem = (text) => {
+  const handleAddItem = (data) => {
     if (socket) {
-      socket.emit('add_item', text);
+      socket.emit('add_item', data);
+    }
+  };
+
+  const handleUpdateDueDate = (itemId, dueDate) => {
+    if (socket) {
+      socket.emit('update_item_due_date', { itemId, dueDate });
     }
   };
 
@@ -169,6 +181,7 @@ export default function App() {
             onAddItem={handleAddItem}
             onDeleteItem={handleDeleteItem}
             onClearItems={handleClearItems}
+            onUpdateDueDate={handleUpdateDueDate}
             soundEnabled={soundEnabled}
           />
         )}

@@ -74,6 +74,18 @@ export function playSound(type = 'check') {
 
       osc.start(now);
       osc.stop(now + 0.25);
+    } else if (type === 'warning' || type === 'alarm') {
+      // 期限超過アラート音（ピピピッという注意喚起音）
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(880, now);
+      osc.frequency.setValueAtTime(440, now + 0.1);
+      osc.frequency.setValueAtTime(880, now + 0.2);
+
+      gain.gain.setValueAtTime(0.15, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+
+      osc.start(now);
+      osc.stop(now + 0.35);
     }
   } catch (e) {
     console.warn('Audio play error:', e);
