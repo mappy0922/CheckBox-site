@@ -1,0 +1,52 @@
+# Discord Checkbox Sync (リアルタイム連携チェックリスト)
+
+Discordの特定チャンネルとWebサイトをリアルタイム連携させ、メッセージ送信でアイテムの自動生成や完了チェックを行うWebシステムです。
+
+---
+
+## 🎯 動作の流れ（方式①）
+
+1. **Webサイト側で「サイトを起動する」をクリック**
+   - 画面にランダムな4桁の起動コード（例: `4829`）が表示されます。
+2. **Discordの連携したいチャンネルでコードを入力**
+   - 例: `4829` と送信。
+   - Botがそのチャンネルを自動特定し、Webサイトと連携開始（🚀リアクションと確認メッセージが返ります）。
+3. **アイテムを追加**
+   - Discordで `サラダ` や `納豆` と送信すると、Webサイトにチェックボックス付きアイテムが即座に追加されます。
+   - 改行やカンマ区切りで一度に複数追加も可能です。
+4. **アイテムを完了チェック**
+   - Discordで `サラダ購入` や `納豆完了` と送信すると、Webサイト上の「サラダ」に自動でチェックが付きます。
+5. **Webサイト側で「起動停止」をクリック**
+   - サイト側のボタンを押すだけで監視が安全に終了します（Discord側での操作は不要）。
+
+---
+
+## 🚀 起動方法
+
+### 1. 依存パッケージのインストール
+ターミナルで以下を実行します：
+```bash
+npm install
+```
+
+### 2. Discord Bot の準備
+1. [Discord Developer Portal](https://discord.com/developers/applications) にアクセスし、「New Application」を作成。
+2. 左メニュー「Bot」から **Token** をコピー。
+3. 同画面の **Privileged Gateway Intents** にある **「MESSAGE CONTENT INTENT」** を **ON** にする。
+4. 左メニュー「OAuth2」→「URL Generator」で `bot` スコープを選び、権限（Send Messages, Read Message History, Add Reactions など）を選択して発行されたURLからサーバーにBotを招待。
+
+### 3. 環境変数の設定（またはサイト画面から入力）
+プロジェクト直下の `.env.example` を `.env` にリネームまたはコピーし、Botトークンを貼り付けます：
+```env
+DISCORD_BOT_TOKEN=あなたのBotトークン
+PORT=3001
+```
+※ サイト右上の「設定」アイコンから画面上でトークンを入力して接続することも可能です。
+
+### 4. アプリケーションの起動
+```bash
+# フロントエンド(Vite)とバックエンド(Express+Bot)を同時に起動
+npm run dev:all
+```
+- フロントエンド: `http://localhost:5173`
+- バックエンド: `http://localhost:3001`
